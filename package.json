@@ -1,0 +1,11 @@
+{
+  "name": "macos-auto-audio-recorder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local, streaming Python audio recorder and batch standardizer for macOS",
+  "scripts": {
+    "dev": ".venv/bin/python auto_recorder.py",
+    "start": ".venv/bin/python auto_recorder.py",
+    "test": ".venv/bin/python -m unittest discover -s tests -v"
+  }
+}
