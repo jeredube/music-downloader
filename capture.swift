@@ -12,7 +12,7 @@
 //   both   : pre + post at the same time (default) → WAVs you can diff / compare spectra
 //
 // Recordings are split into one segment per track using Spotify / Apple Music now-playing metadata
-// (see NowPlaying below); each segment gets <n>-<artist - title>-<stream>.wav plus a JSON sidecar,
+// (see NowPlaying below); each segment gets <artist - title>.wav plus a JSON sidecar,
 // and the session folder gets a session.json manifest. The capture follows the system's selected
 // output device (a device switch starts a new segment), and `pre` switches a loopback device to the
 // track's native sample rate so it is recorded without resampling.
@@ -937,6 +937,19 @@ func slug(_ s: String) -> String {
     return String(cleaned.trimmingCharacters(in: .whitespaces).prefix(80))
 }
 
+/// Keep song filenames clean while preserving repeated recordings and concurrent streams.
+func recordingFileURL(_ name: String) -> URL {
+    let stem = slug(name)
+    var url = sessionDir.appendingPathComponent(stem + ".wav")
+    while FileManager.default.fileExists(atPath: url.path)
+        || FileManager.default.fileExists(atPath: url.deletingLastPathComponent()
+            .appendingPathComponent("." + url.lastPathComponent + ".part").path) {
+        let copyID = String(UUID().uuidString.prefix(8)).lowercased()
+        url = sessionDir.appendingPathComponent(stem + " (copy " + copyID + ").wav")
+    }
+    return url
+}
+
 func secs(_ from: UInt64, _ to: UInt64) -> Double {
     (Double(AudioConvertHostTimeToNanos(to)) - Double(AudioConvertHostTimeToNanos(from))) / 1e9
 }
@@ -1022,7 +1035,7 @@ func transition(to info: TrackInfo?, at: UInt64, force: Bool = false) {
     if next != nil, let p = playing { Artwork.fetch(for: p) }
     func newFile(_ r: Recorder) -> WavFile? {
         guard let n = next else { return nil }
-        let url = sessionDir.appendingPathComponent(String(format: "%03d-%@-%@.wav", n.index, slug(n.name), r.label))
+        let url = recordingFileURL(n.name)
         return try? WavFile(url: url, channels: r.channels, sampleRate: r.sampleRate)
     }
 

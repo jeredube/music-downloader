@@ -1,6 +1,6 @@
 # Native macOS audio capture
 
-`capture.swift` is the supplied source file, copied unchanged.
+`capture.swift` uses the supplied recording implementation, with clean `Artist - Title.wav` song filenames.
 
 ## Requirements
 
@@ -25,8 +25,8 @@ cd /Users/jeremydube/Desktop/projects/repos/music-downloader
 ```
 
 The launcher builds the program when needed, then records until Ctrl+C, saving
-sessions to `~/Desktop/dj/recorded-songs/<timestamp>/`. The Swift source remains
-unchanged. You can also double-click `record.command` in Finder to launch it.
+sessions to `~/Desktop/dj/recorded-songs/<timestamp>/`. You can also double-click
+`record.command` in Finder to launch it.
 
 Use your normal speakers or headphones as the macOS sound output to capture via a
 native process tap. In this configuration, BlackHole and AudioFlow are not required.
@@ -42,6 +42,10 @@ under `~/Desktop/dj/recorded-songs/<timestamp>/` when using the launcher, with W
 segments, track JSON sidecars and a `session.json` manifest. Running `capture`
 directly still uses its original `recordings/` default unless you supply `--out`.
 The supplied code writes WAV; it does not expose a 320 kbps encoding setting.
+
+Song files use `Artist - Title.wav`, without a track number or stream suffix.
+If that name is already used, a short ` (copy …)` suffix preserves the additional
+recording. JSON sidecars and session metadata retain their existing diagnostic naming.
 
 Other commands:
 
