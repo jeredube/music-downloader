@@ -264,6 +264,15 @@ final class WavFile {
     func publish() {
         try? FileManager.default.removeItem(at: url)
         try? FileManager.default.moveItem(at: partURL, to: url)
+        // Finder can retain the hidden flag from the dot-prefixed temporary file.
+        var values = URLResourceValues()
+        values.isHidden = false
+        var publishedURL = url
+        do {
+            try publishedURL.setResourceValues(values)
+        } catch {
+            print("  ! couldn't make saved audio visible in Finder: \(url.path): \(error)")
+        }
     }
 
     func discard() { try? FileManager.default.removeItem(at: partURL) }

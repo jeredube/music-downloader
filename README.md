@@ -46,6 +46,8 @@ The supplied code writes WAV; it does not expose a 320 kbps encoding setting.
 Song files use `Artist - Title.wav`, without a track number or stream suffix.
 If that name is already used, a short ` (copy …)` suffix preserves the additional
 recording. JSON sidecars and session metadata retain their existing diagnostic naming.
+Finished WAV files are made visible in Finder; the launcher also repairs hidden
+flags on recordings saved by earlier versions. In-progress `.part` files stay hidden.
 
 Other commands:
 
