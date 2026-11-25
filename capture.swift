@@ -12,7 +12,7 @@
 //   both   : pre + post at the same time (default) → WAVs you can diff / compare spectra
 //
 // Recordings are split into one segment per track using Spotify / Apple Music now-playing metadata
-// (see NowPlaying below); each segment gets <artist - title>.wav plus a JSON sidecar,
+// (see NowPlaying below); each segment gets <artist - title>.wav,
 // and the session folder gets a session.json manifest. The capture follows the system's selected
 // output device (a device switch starts a new segment), and `pre` switches a loopback device to the
 // track's native sample rate so it is recorded without resampling.
@@ -669,7 +669,7 @@ final class TapSource: Source {
 // Each finished WAV gets two extra RIFF chunks after the audio:
 //   LIST/INFO : title / artist / album / comment — the classic WAV tags most tools read
 //   "id3 "    : an ID3v2.3 tag with the same text, TXXX diagnostics fields and the cover (APIC) —
-//               read by Music, VLC, foobar2000, Mp3tag, rekordbox, Serato, exiftool, ffprobe…
+//               read by compatible tag readers; rekordbox reads RIFF INFO for WAV and may ignore this artwork.
 
 func runOsascript(_ script: String) -> String? {
     let p = Process()
@@ -963,7 +963,7 @@ func secs(_ from: UInt64, _ to: UInt64) -> Double {
     (Double(AudioConvertHostTimeToNanos(to)) - Double(AudioConvertHostTimeToNanos(from))) / 1e9
 }
 
-/// Finish `seg` (its files were already closed by Recorder.split) and write its JSON sidecar.
+/// Finish `seg` (its files were already closed by Recorder.split) and retain its metadata in the session manifest.
 func finalize(_ seg: Segment, endHost: UInt64) {
     let frames = seg.files.values.reduce(UInt64(0)) { $0 + $1.file.frames }
     if frames == 0 {   // nothing captured (e.g. instant skip) — don't litter the folder
@@ -1005,10 +1005,6 @@ func finalize(_ seg: Segment, endHost: UInt64) {
     if let info = seg.info { entry["track"] = info.json }
     entry["album_art_embedded"] = cover != nil
     manifest.append(entry)
-    let url = sessionDir.appendingPathComponent(String(format: "%03d-%@.json", seg.index, slug(seg.name)))
-    if let data = try? JSONSerialization.data(withJSONObject: entry, options: [.prettyPrinted, .sortedKeys]) {
-        try? data.write(to: url)
-    }
     let durs = seg.files.sorted { $0.key < $1.key }
         .map { String(format: "%@ %.1fs@%.0f", $0.key, Double($0.value.file.frames) / $0.value.file.sampleRate, $0.value.file.sampleRate) }
     print("  ✔ segment \(seg.index) \"\(seg.name)\": \(durs.joined(separator: ", "))")
@@ -1161,10 +1157,17 @@ let session: [String: Any] = [
     "clipped_samples": Dictionary(uniqueKeysWithValues: sources.map { ($0.recorder.label, $0.recorder.clippedTotal) }),
     "segments": manifest,
 ]
-if let data = try? JSONSerialization.data(withJSONObject: session, options: [.prettyPrinted, .sortedKeys]) {
-    try? data.write(to: sessionDir.appendingPathComponent("session.json"))
+let sessionURL = sessionDir.appendingPathComponent("session.json")
+do {
+    let data = try JSONSerialization.data(withJSONObject: session, options: [.prettyPrinted, .sortedKeys])
+    try data.write(to: sessionURL, options: .atomic)
+} catch {
+    FileHandle.standardError.write(Data("error: couldn't save session.json: \(error)\n".utf8))
+    exit(1)
 }
 print("\n\(manifest.count) segment(s) written to \(sessionDir.path)")
 for s in sources where s.recorder.clippedTotal > 0 {
     print("  \(s.recorder.label): \(s.recorder.clippedTotal) clipped samples")
 }
+
+print("Session report: \(sessionURL.path)")

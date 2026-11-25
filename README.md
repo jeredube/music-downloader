@@ -39,13 +39,16 @@ when prompted. Relaunch the terminal if macOS requests it.
 
 Start playing music. Press **Ctrl+C** to stop and finalize the session. Output goes
 under `~/Desktop/dj/recorded-songs/<timestamp>/` when using the launcher, with WAV
-segments, track JSON sidecars and a `session.json` manifest. Running `capture`
+segments only while recording, plus a single `session.json` manifest when the
+recorder exits normally (Ctrl+C or its duration limit). No per-song JSON files are
+created. The final terminal line prints the session report path. Running `capture`
 directly still uses its original `recordings/` default unless you supply `--out`.
 The supplied code writes WAV; it does not expose a 320 kbps encoding setting.
 
 Song files use `Artist - Title.wav`, without a track number or stream suffix.
 If that name is already used, a short ` (copy …)` suffix preserves the additional
-recording. JSON sidecars and session metadata retain their existing diagnostic naming.
+recording. Per-track metadata remains embedded in the WAV and is also included in
+the final `session.json` manifest.
 Finished WAV files are made visible in Finder; the launcher also repairs hidden
 flags on recordings saved by earlier versions. In-progress `.part` files stay hidden.
 
@@ -85,3 +88,22 @@ Use Do Not Disturb and close other sound-producing apps for clean recordings.
 
 References: [BlackHole system-output routing](https://github.com/ExistentialAudio/BlackHole/wiki/Getting-Started%3A-Sending-System-Audio-to-BlackHole)
 and [recommended BlackHole levels](https://github.com/ExistentialAudio/BlackHole/discussions/840).
+
+## Album covers in Finder versus rekordbox
+
+The recorder embeds title/artist/album text in WAV RIFF INFO and embeds artwork in
+an ID3 APIC frame. Finder can display that embedded image. Rekordbox's documented
+WAV metadata reader uses RIFF INFO, so a Finder thumbnail does not guarantee the
+cover will import into rekordbox. This is not caused by the JSON reports.
+
+To keep WAV files, add the cover directly in rekordbox: select the track in
+Collection, open the track information panel, select **Artwork**, then drag a JPEG
+or PNG image onto the panel. The cover is associated with the rekordbox library
+entry; keep a library backup. Reload Tag alone is not a reliable WAV-artwork fix.
+
+For automatic embedded artwork import, an artwork-friendly format such as AIFF
+with ID3 tags is the alternative. This project continues to output WAV as requested;
+no files are converted or removed, and no artwork-image sidecars are generated.
+
+References: [rekordbox WAV metadata formats](https://cdn.rekordbox.com/files/20251202174516/rekordbox7.2.8_manual_EN.pdf#page=13)
+and [adding artwork](https://cdn.rekordbox.com/files/20251202174516/rekordbox7.2.8_manual_EN.pdf#page=26).
