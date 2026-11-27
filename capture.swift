@@ -9,10 +9,10 @@
 //            "AudioFlow 2ch"; otherwise a global process tap excluding AudioFlow)
 //   post   : Core Audio process tap on the AudioFlow backend = exactly what AudioFlow sends to the speakers
 //   system : Core Audio global tap of every process (use when AudioFlow is NOT running, as a baseline)
-//   both   : pre + post at the same time (default) → WAVs you can diff / compare spectra
+//   both   : pre + post at the same time (default) → AIFFs you can diff / compare spectra
 //
 // Recordings are split into one segment per track using Spotify / Apple Music now-playing metadata
-// (see NowPlaying below); each segment gets <artist - title>.wav,
+// (see NowPlaying below); each segment gets <artist - title>.aiff,
 // and the session folder gets a session.json manifest. The capture follows the system's selected
 // output device (a device switch starts a new segment), and `pre` switches a loopback device to the
 // track's native sample rate so it is recorded without resampling.
@@ -225,72 +225,86 @@ func procName(_ pid: pid_t) -> String? {
     guard proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 else { return nil }
     return (String(cString: buf) as NSString).lastPathComponent
 }
-// MARK: - WAV writer (32-bit float, interleaved, split into per-track segments) + live stats
+// MARK: - AIFF writer (24-bit PCM, interleaved, split into per-track segments) + live stats
 
 func hostNow() -> UInt64 { AudioGetCurrentHostTime() }
 
-final class WavFile {
+final class AiffFile {
     let url: URL
     let channels: Int
     let sampleRate: Double
-    private let handle: FileHandle
+    private var handle: ExtAudioFileRef?
     private(set) var frames: UInt64 = 0
 
-    /// Recorded into a hidden ".<name>.part" file and renamed to `url` by publish() once complete
-    /// and tagged, so Finder/Spotlight never index (and cache a thumbnail for) a half-written file.
+    /// Keep in-progress audio hidden until it is closed and tagged.
     let partURL: URL
 
     init(url: URL, channels: Int, sampleRate: Double) throws {
         self.url = url; self.channels = channels; self.sampleRate = sampleRate
         partURL = url.deletingLastPathComponent().appendingPathComponent("." + url.lastPathComponent + ".part")
-        FileManager.default.createFile(atPath: partURL.path, contents: nil)
-        handle = try FileHandle(forWritingTo: partURL)
-        handle.write(WavFile.header(channels: channels, rate: sampleRate, frames: 0))
-    }
-
-    func write(_ samples: ArraySlice<Float>) {
-        guard !samples.isEmpty else { return }
-        samples.withUnsafeBytes { handle.write(Data($0)) }
-        frames += UInt64(samples.count / channels)
-    }
-
-    func close() {
-        handle.seek(toFileOffset: 0)
-        handle.write(WavFile.header(channels: channels, rate: sampleRate, frames: frames))
-        try? handle.close()
-    }
-
-    /// Give the finished file its real name.
-    func publish() {
-        try? FileManager.default.removeItem(at: url)
-        try? FileManager.default.moveItem(at: partURL, to: url)
-        // Finder can retain the hidden flag from the dot-prefixed temporary file.
-        var values = URLResourceValues()
-        values.isHidden = false
-        var publishedURL = url
+        var diskFormat = AudioStreamBasicDescription(
+            mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked | kAudioFormatFlagIsBigEndian,
+            mBytesPerPacket: UInt32(channels * 3), mFramesPerPacket: 1,
+            mBytesPerFrame: UInt32(channels * 3), mChannelsPerFrame: UInt32(channels),
+            mBitsPerChannel: 24, mReserved: 0)
+        try check(ExtAudioFileCreateWithURL(partURL as CFURL, kAudioFileAIFFType, &diskFormat,
+                                            nil, 0, &handle), "create AIFF \(url.lastPathComponent)")
+        var clientFormat = AudioStreamBasicDescription(
+            mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagsNativeFloatPacked,
+            mBytesPerPacket: UInt32(channels * 4), mFramesPerPacket: 1,
+            mBytesPerFrame: UInt32(channels * 4), mChannelsPerFrame: UInt32(channels),
+            mBitsPerChannel: 32, mReserved: 0)
         do {
-            try publishedURL.setResourceValues(values)
+            try check(ExtAudioFileSetProperty(handle!, kExtAudioFileProperty_ClientDataFormat,
+                                              UInt32(MemoryLayout<AudioStreamBasicDescription>.size), &clientFormat),
+                      "configure AIFF input")
         } catch {
-            print("  ! couldn't make saved audio visible in Finder: \(url.path): \(error)")
+            ExtAudioFileDispose(handle!); handle = nil
+            try? FileManager.default.removeItem(at: partURL)
+            throw error
         }
     }
 
-    func discard() { try? FileManager.default.removeItem(at: partURL) }
+    func write(_ samples: ArraySlice<Float>) {
+        guard !samples.isEmpty, let handle else { return }
+        let count = UInt32(samples.count / channels)
+        let status = samples.withUnsafeBytes { bytes -> OSStatus in
+            var buffers = AudioBufferList(mNumberBuffers: 1,
+                mBuffers: AudioBuffer(mNumberChannels: UInt32(channels), mDataByteSize: UInt32(bytes.count),
+                                      mData: UnsafeMutableRawPointer(mutating: bytes.baseAddress)))
+            return ExtAudioFileWrite(handle, count, &buffers)
+        }
+        guard status == noErr else { fail(CAError(what: "write AIFF \(url.lastPathComponent)", status: status)) }
+        frames += UInt64(count)
+    }
 
-    static func header(channels: Int, rate: Double, frames: UInt64) -> Data {
-        let dataBytes = UInt32(clamping: frames * UInt64(channels) * 4)
-        var d = Data()
-        func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
-        func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
-        d.append(contentsOf: Array("RIFF".utf8)); u32(36 + dataBytes)
-        d.append(contentsOf: Array("WAVE".utf8))
-        d.append(contentsOf: Array("fmt ".utf8)); u32(16)
-        u16(3)                                   // IEEE float
-        u16(UInt16(channels)); u32(UInt32(rate))
-        u32(UInt32(rate) * UInt32(channels) * 4) // byte rate
-        u16(UInt16(channels * 4)); u16(32)
-        d.append(contentsOf: Array("data".utf8)); u32(dataBytes)
-        return d
+    func close() {
+        guard let open = handle else { return }
+        handle = nil
+        let status = ExtAudioFileDispose(open)
+        guard status == noErr else { fail(CAError(what: "close AIFF \(url.lastPathComponent)", status: status)) }
+    }
+
+    /// Give the finished file its real name. Never replace another recording.
+    func publish() throws {
+        try FileManager.default.moveItem(at: partURL, to: url)
+        // A renamed dot-file can retain Finder's hidden flag.
+        try FileManager.default.setAttributes([.extensionHidden: false], ofItemAtPath: url.path)
+        var values = URLResourceValues()
+        values.isHidden = false
+        var publishedURL = url
+        try publishedURL.setResourceValues(values)
+    }
+
+    func discard() { close(); try? FileManager.default.removeItem(at: partURL) }
+
+    deinit { if let handle { ExtAudioFileDispose(handle) } }
+
+    private func fail(_ error: Error) -> Never {
+        FileHandle.standardError.write(Data("error: \(error) (unfinished audio remains at \(partURL.path))\n".utf8))
+        exit(1)
     }
 }
 
@@ -303,7 +317,7 @@ final class Recorder {
     private var pending: [Float] = []
     /// Host time of the first frame of each IO callback, and where that callback starts in `pending`.
     private var marks: [(host: UInt64, index: Int)] = []
-    private var file: WavFile?          // nil = audio is discarded (e.g. not the test track)
+    private var file: AiffFile?          // nil = audio is discarded (e.g. not the test track)
 
     // stats since last report (guarded by lock)
     private var peak: Float = 0
@@ -393,7 +407,7 @@ final class Recorder {
     /// Main thread: end the current segment at host time `at` (sample-accurate within the captured
     /// buffers) and continue into `next` (nil = discard). Returns the closed file, if any.
     @discardableResult
-    func split(at: UInt64, next: WavFile?) -> WavFile? {
+    func split(at: UInt64, next: AiffFile?) -> AiffFile? {
         let (chunk, m) = take()
         var cut = chunk.count
         if let mark = m.last(where: { $0.host <= at }) {
@@ -632,7 +646,7 @@ final class TapSource: Source {
 
         let tapCh = Int(fmt.mChannelsPerFrame)
         // The tap reports its own format (often 48 kHz), but the aggregate delivers it at the
-        // aggregate's rate, which follows the clock device. Label the WAV with the delivered rate.
+        // aggregate's rate, which follows the clock device. Label the AIFF with the delivered rate.
         let deliveredRate = [nominalRate(aggID), nominalRate(clockDevice), fmt.mSampleRate].first { $0 > 0 } ?? 48000
         recorder = Recorder(label: label, channels: tapCh, sampleRate: deliveredRate)
 
@@ -664,12 +678,9 @@ final class TapSource: Source {
         if tapID != kAudioObjectUnknown { AudioHardwareDestroyProcessTap(tapID) }
     }
 }
-// MARK: - Album art + tags embedded in the segment WAVs
-//
-// Each finished WAV gets two extra RIFF chunks after the audio:
-//   LIST/INFO : title / artist / album / comment — the classic WAV tags most tools read
-//   "id3 "    : an ID3v2.3 tag with the same text, TXXX diagnostics fields and the cover (APIC) —
-//               read by compatible tag readers; rekordbox reads RIFF INFO for WAV and may ignore this artwork.
+// MARK: - Album art + tags embedded in the segment AIFFs
+// Each finished AIFF gets an ID3 chunk with title/artist/album, diagnostic fields,
+// and a JPEG/PNG front-cover APIC frame that rekordbox can import.
 
 func runOsascript(_ script: String) -> String? {
     let p = Process()
@@ -760,23 +771,7 @@ struct Tags {
     var cover: Data?
 }
 
-private func le32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
 private func be32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.bigEndian) { Data($0) } }
-
-private func riffChunk(_ id: String, _ body: Data) -> Data {
-    var d = Data(id.utf8) + le32(UInt32(body.count)) + body
-    if body.count % 2 == 1 { d.append(0) }
-    return d
-}
-
-private func listInfo(_ t: Tags) -> Data {
-    var body = Data("INFO".utf8)
-    for (id, v) in [("INAM", t.title), ("IART", t.artist), ("IPRD", t.album), ("ICMT", t.comment), ("ISFT", "capture")]
-    where !v.isEmpty {
-        body += riffChunk(id, Data(v.utf8) + Data([0]))
-    }
-    return riffChunk("LIST", body)
-}
 
 private func id3v23(_ t: Tags) -> Data {
     func utf16(_ s: String) -> Data { Data([0xFF, 0xFE]) + (s.data(using: .utf16LittleEndian) ?? Data()) }
@@ -802,16 +797,22 @@ private func id3v23(_ t: Tags) -> Data {
     return Data("ID3".utf8) + Data([3, 0, 0]) + size + frames
 }
 
-/// Append LIST/INFO and id3 chunks to a finished WAV and fix up the RIFF size.
-func embedTags(_ url: URL, _ tags: Tags) {
-    guard let h = try? FileHandle(forUpdating: url) else { return }
+/// Append an IFF ID3 chunk to a closed AIFF and update its big-endian FORM size.
+func embedTags(_ url: URL, _ tags: Tags) throws {
+    let h = try FileHandle(forUpdating: url)
     defer { try? h.close() }
-    h.seekToEndOfFile()
-    h.write(listInfo(tags))
-    h.write(riffChunk("id3 ", id3v23(tags)))
-    let total = h.offsetInFile
-    h.seek(toFileOffset: 4)
-    h.write(le32(UInt32(clamping: total - 8)))
+    let tag = id3v23(tags)
+    var chunk = Data("ID3 ".utf8) + be32(UInt32(tag.count)) + tag
+    if tag.count % 2 == 1 { chunk.append(0) }
+    let end = try h.seekToEnd()
+    guard end + UInt64(chunk.count) - 8 <= UInt64(UInt32.max) else {
+        throw NSError(domain: "capture", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: "AIFF is too large for a FORM chunk"])
+    }
+    try h.write(contentsOf: chunk)
+    try h.seek(toOffset: 4)
+    try h.write(contentsOf: be32(UInt32(end + UInt64(chunk.count) - 8)))
+    try h.synchronize()
 }
 
 // MARK: - Device sample rate (for --mode pre)
@@ -932,7 +933,7 @@ struct Segment {
     let info: TrackInfo?
     let started: Date
     let startHost: UInt64
-    var files: [String: (file: WavFile, offset: Double)] = [:]
+    var files: [String: (file: AiffFile, offset: Double)] = [:]
 }
 
 var current: Segment?
@@ -949,12 +950,12 @@ func slug(_ s: String) -> String {
 /// Keep song filenames clean while preserving repeated recordings and concurrent streams.
 func recordingFileURL(_ name: String) -> URL {
     let stem = slug(name)
-    var url = sessionDir.appendingPathComponent(stem + ".wav")
+    var url = sessionDir.appendingPathComponent(stem + ".aiff")
     while FileManager.default.fileExists(atPath: url.path)
         || FileManager.default.fileExists(atPath: url.deletingLastPathComponent()
             .appendingPathComponent("." + url.lastPathComponent + ".part").path) {
         let copyID = String(UUID().uuidString.prefix(8)).lowercased()
-        url = sessionDir.appendingPathComponent(stem + " (copy " + copyID + ").wav")
+        url = sessionDir.appendingPathComponent(stem + " (copy " + copyID + ").aiff")
     }
     return url
 }
@@ -970,7 +971,7 @@ func finalize(_ seg: Segment, endHost: UInt64) {
         seg.files.values.forEach { $0.file.discard() }
         return
     }
-    // Tag every WAV of the segment (title/artist/album, diagnostics fields, album art).
+    // Tag every AIFF of the segment (title/artist/album, diagnostics fields, album art).
     var cover: Data?
     if let info = seg.info { Artwork.waitFor(info.key); cover = Artwork.cache[info.key] }
     for (label, f) in seg.files where f.file.frames > 0 {
@@ -988,15 +989,18 @@ func finalize(_ seg: Segment, endHost: UInt64) {
         t.extra += [("CAPTURE_STREAM", label), ("CAPTURE_SEGMENT", String(seg.index)),
                     ("CAPTURE_START_OFFSET_S", String(format: "%.4f", f.offset))]
         t.cover = cover
-        embedTags(f.file.partURL, t)
+        do { try embedTags(f.file.partURL, t) }
+        catch { bail("couldn't tag \(f.file.url.lastPathComponent): \(error)") }
     }
-    seg.files.values.forEach { $0.file.publish() }
+    do {
+        for f in seg.files.values { try f.file.publish() }
+    } catch { bail("couldn't publish AIFF: \(error)") }
 
     var files: [String: Any] = [:]
     for (label, f) in seg.files {
         files[label] = ["file": f.file.url.lastPathComponent, "frames": f.file.frames,
                         "seconds": Double(f.file.frames) / f.file.sampleRate, "sample_rate": f.file.sampleRate,
-                        "channels": f.file.channels, "start_offset_s": f.offset]
+                        "channels": f.file.channels, "bit_depth": 24, "format": "aiff", "start_offset_s": f.offset]
     }
     var entry: [String: Any] = ["index": seg.index, "name": seg.name,
                                 "started_at": iso.string(from: seg.started),
@@ -1008,7 +1012,7 @@ func finalize(_ seg: Segment, endHost: UInt64) {
     let durs = seg.files.sorted { $0.key < $1.key }
         .map { String(format: "%@ %.1fs@%.0f", $0.key, Double($0.value.file.frames) / $0.value.file.sampleRate, $0.value.file.sampleRate) }
     print("  ✔ segment \(seg.index) \"\(seg.name)\": \(durs.joined(separator: ", "))")
-    // Sanity check: recorded duration should match wall-clock time. A mismatch means the WAV's
+    // Sanity check: recorded duration should match wall-clock time. A mismatch means the AIFF's
     // sample rate label is wrong (audio would play too fast/slow) or audio was dropped.
     let wall = secs(seg.startHost, endHost)
     for (label, f) in seg.files where wall > 2 && f.file.frames > 0 {
@@ -1038,10 +1042,11 @@ func transition(to info: TrackInfo?, at: UInt64, force: Bool = false) {
     var next: Segment? = wanted ? Segment(index: nextIndex, name: name, info: playing, started: Date(), startHost: at) : nil
     if next != nil { nextIndex += 1 }
     if next != nil, let p = playing { Artwork.fetch(for: p) }
-    func newFile(_ r: Recorder) -> WavFile? {
+    func newFile(_ r: Recorder) -> AiffFile? {
         guard let n = next else { return nil }
         let url = recordingFileURL(n.name)
-        return try? WavFile(url: url, channels: r.channels, sampleRate: r.sampleRate)
+        do { return try AiffFile(url: url, channels: r.channels, sampleRate: r.sampleRate) }
+        catch { bail("couldn't create AIFF: \(error)") }
     }
 
     // pre: follow the track's native sample rate so the loopback doesn't resample it.
@@ -1123,6 +1128,7 @@ transition(to: nowPlaying.current, at: hostNow())
 
 if let t = opts.track { print("waiting for test track matching \"\(t)\"" + (opts.once ? " (stops after it ends)" : "")) }
 print(opts.duration > 0 ? "recording for \(opts.duration)s (Ctrl-C to stop early)…" : "recording until Ctrl-C…")
+print("output format: 24-bit PCM AIFF with embedded artwork")
 print("session folder: \(sessionDir.path)")
 
 signal(SIGINT, SIG_IGN)

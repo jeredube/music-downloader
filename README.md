@@ -1,6 +1,7 @@
 # Native macOS audio capture
 
-`capture.swift` uses the supplied recording implementation, with clean `Artist - Title.wav` song filenames.
+`capture.swift` records 24-bit PCM AIFF with clean `Artist - Title.aiff` song filenames
+and embedded artwork for rekordbox.
 
 ## Requirements
 
@@ -38,19 +39,23 @@ Screen & System Audio Recording**. Allow Spotify / Music access under **Automati
 when prompted. Relaunch the terminal if macOS requests it.
 
 Start playing music. Press **Ctrl+C** to stop and finalize the session. Output goes
-under `~/Desktop/dj/recorded-songs/<timestamp>/` when using the launcher, with WAV
+under `~/Desktop/dj/recorded-songs/<timestamp>/` when using the launcher, with AIFF
 segments only while recording, plus a single `session.json` manifest when the
 recorder exits normally (Ctrl+C or its duration limit). No per-song JSON files are
 created. The final terminal line prints the session report path. Running `capture`
 directly still uses its original `recordings/` default unless you supply `--out`.
-The supplied code writes WAV; it does not expose a 320 kbps encoding setting.
+Audio is uncompressed 24-bit PCM AIFF at the captured sample rate; there is no
+320 kbps encoding setting. Compared with the previous 32-bit float WAVs, audio
+uses about 25% less space, with only negligible quantization differences.
 
-Song files use `Artist - Title.wav`, without a track number or stream suffix.
+Song files use `Artist - Title.aiff`, without a track number or stream suffix.
 If that name is already used, a short ` (copy …)` suffix preserves the additional
-recording. Per-track metadata remains embedded in the WAV and is also included in
+recording. Per-track metadata remains embedded in the AIFF and is also included in
 the final `session.json` manifest.
-Finished WAV files are made visible in Finder; the launcher also repairs hidden
+Finished AIFF files are made visible in Finder; the launcher also repairs hidden
 flags on recordings saved by earlier versions. In-progress `.part` files stay hidden.
+Restart the recorder after updating to use AIFF for a new session; an already-running
+session continues using its original executable. Existing recordings are not changed.
 
 Other commands:
 
@@ -75,8 +80,9 @@ through physical speakers or headphones. It serves as the dummy output.
 3. Open **System Settings → Sound → Output** and select **BlackHole 2ch** directly.
    This route should contain only the virtual device, with no speakers/headphones
    added through a Multi-Output Device.
-4. Set Spotify's own volume slider to 100%. Because the selected output is virtual,
-   this sends full-level digital audio to BlackHole without speaker playback.
+4. Set Spotify's volume to a suitable recording level. If the recorder reports
+   repeated `CLIP` warnings, lower it slightly to leave headroom. The virtual
+   output sends digital audio to BlackHole without speaker playback.
 5. Start `./record.command`, allow any Microphone permission requested for the
    virtual input, and press Play in Spotify. `--mode pre` automatically reads the
    selected loopback device's input; no AudioFlow application is needed.
@@ -89,21 +95,25 @@ Use Do Not Disturb and close other sound-producing apps for clean recordings.
 References: [BlackHole system-output routing](https://github.com/ExistentialAudio/BlackHole/wiki/Getting-Started%3A-Sending-System-Audio-to-BlackHole)
 and [recommended BlackHole levels](https://github.com/ExistentialAudio/BlackHole/discussions/840).
 
-## Album covers in Finder versus rekordbox
+## Album covers and rekordbox
 
-The recorder embeds title/artist/album text in WAV RIFF INFO and embeds artwork in
-an ID3 APIC frame. Finder can display that embedded image. Rekordbox's documented
-WAV metadata reader uses RIFF INFO, so a Finder thumbnail does not guarantee the
-cover will import into rekordbox. This is not caused by the JSON reports.
+New recordings include title, artist, album and an ID3 APIC front-cover image in
+the AIFF itself. The cover is fetched while the song records and embedded when
+the file is finalized. Artwork requires an available cover from Spotify or Apple
+Music; failed or unavailable artwork does not prevent audio from being saved.
 
-To keep WAV files, add the cover directly in rekordbox: select the track in
-Collection, open the track information panel, select **Artwork**, then drag a JPEG
-or PNG image onto the panel. The cover is associated with the rekordbox library
-entry; keep a library backup. Reload Tag alone is not a reliable WAV-artwork fix.
+Import the finished `.aiff` files into rekordbox and analyze them. For the XDJ-RX3,
+use 44.1 kHz or 48 kHz recordings and export the playlist to USB with **Device
+Library** included. These AIFFs use the RX3-supported 24-bit PCM format. Higher
+sample rates captured from another source are preserved and must be converted
+before use on the RX3.
 
-For automatic embedded artwork import, an artwork-friendly format such as AIFF
-with ID3 tags is the alternative. This project continues to output WAV as requested;
-no files are converted or removed, and no artwork-image sidecars are generated.
+Older WAVs can have embedded artwork that Finder displays while rekordbox ignores
+it, because rekordbox's WAV reader uses RIFF INFO. Converting those recordings to
+AIFF must copy their ID3 tags and artwork; renaming the extension is not conversion.
+No artwork-image sidecars or per-track JSON reports are generated.
 
 References: [rekordbox WAV metadata formats](https://cdn.rekordbox.com/files/20251202174516/rekordbox7.2.8_manual_EN.pdf#page=13)
-and [adding artwork](https://cdn.rekordbox.com/files/20251202174516/rekordbox7.2.8_manual_EN.pdf#page=26).
+and [adding artwork](https://cdn.rekordbox.com/files/20251202174516/rekordbox7.2.8_manual_EN.pdf#page=26),
+[XDJ-RX3 formats](https://downloads.support.alphatheta.com/manuals/XDJ_RX3_DRI1702C_manual.pdf#page=10),
+and [USB library compatibility](https://alphatheta.com/en/information/important-notice-for-customers-using-usb-devices-with-our-dj-equipment/).
